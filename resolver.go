@@ -81,8 +81,9 @@ func (d *NATDetail) String() string {
 }
 
 type Resolver struct {
-	conn   net.PacketConn
-	client *turn.Client
+	conn       net.PacketConn
+	client     *turn.Client
+	readerDone chan struct{}
 }
 
 func (r Resolver) Resolve() (*NATDetail, error) {
@@ -159,6 +160,18 @@ func (r Resolver) test(stunServer string, changeIp bool, changePort bool) (strin
 
 func (r Resolver) Close() {
 	r.client.Close()
+	// turn.Client.Close only closes its transactions; it does not stop the
+	// Listen goroutine. Interrupt our resolver-owned reader before this socket
+	// is handed to the hole-punch handshake.
+	if err := r.conn.SetReadDeadline(time.Now()); err != nil {
+		log.Debugf("stop STUN reader error: %v\n", err)
+		return
+	}
+	<-r.readerDone
+	log.Debugln("STUN reader stopped")
+	if err := r.conn.SetReadDeadline(time.Time{}); err != nil {
+		log.Debugf("clear STUN read deadline error: %v\n", err)
+	}
 }
 
 func NewResolver(conn net.PacketConn) (r *Resolver, err error) {
@@ -171,14 +184,28 @@ func NewResolver(conn net.PacketConn) (r *Resolver, err error) {
 	if err != nil {
 		return nil, err
 	}
-	err = client.Listen()
-	if err != nil {
-		return nil, err
+	r = &Resolver{
+		conn:       conn,
+		client:     client,
+		readerDone: make(chan struct{}),
 	}
-	return &Resolver{
-		conn:   conn,
-		client: client,
-	}, nil
+	go r.readSTUNResponses()
+	return r, nil
+}
+
+func (r *Resolver) readSTUNResponses() {
+	defer close(r.readerDone)
+
+	buf := make([]byte, 64*1024)
+	for {
+		n, from, err := r.conn.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		if _, err = r.client.HandleInbound(buf[:n], from); err != nil {
+			log.Debugf("handle STUN response from %s error: %v\n", from, err)
+		}
+	}
 }
 
 func buildMsg(changeIp bool, changePort bool) (*stun.Message, error) {
