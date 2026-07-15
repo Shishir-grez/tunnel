@@ -43,6 +43,19 @@ go run ./example -name=Bob -signal=cloudflare -worker=https://<your-worker>.work
 
 Both peers connect directly. Type a message and press Enter to chat.
 
+The example also prints application-level tunnel RTT every two seconds:
+
+```text
+tunnel rtt: 42ms
+```
+
+To change or disable this probe:
+
+```bash
+go run ./example -name=Alice -signal=cloudflare -worker=https://<your-worker>.workers.dev -ping-interval=5s
+go run ./example -name=Alice -signal=cloudflare -worker=https://<your-worker>.workers.dev -ping-interval=0
+```
+
 ## API
 
 ```go

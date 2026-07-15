@@ -12,14 +12,16 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 	"tunnel"
 )
 
 var (
-	name       = flag.String("name", "peer", "display name in chat")
-	signalType = flag.String("signal", "mock", "signal type: mock or cloudflare")
-	workerURL  = flag.String("worker", "", "Cloudflare Worker URL (required when -signal=cloudflare)")
-	room       = flag.String("room", "", "room token; auto-generated and printed if empty (first peer)")
+	name         = flag.String("name", "peer", "display name in chat")
+	signalType   = flag.String("signal", "mock", "signal type: mock or cloudflare")
+	workerURL    = flag.String("worker", "", "Cloudflare Worker URL (required when -signal=cloudflare)")
+	room         = flag.String("room", "", "room token; auto-generated and printed if empty (first peer)")
+	pingInterval = flag.Duration("ping-interval", 2*time.Second, "interval for tunnel RTT samples; set to 0 to disable")
 )
 
 func main() {
@@ -86,6 +88,10 @@ func newSignal(ctx context.Context) (tunnel.Signal, error) {
 // runChat wires up a symmetric chat: both peers can send and receive messages.
 func runChat(ctx context.Context, peer *tunnel.Peer) {
 	displayName := *name
+
+	peer.Handle("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	// outbox fans out messages to all connected remote peers
 	type subscriber struct {
@@ -202,9 +208,41 @@ func runChat(ctx context.Context, peer *tunnel.Peer) {
 	defer resp.Body.Close()
 
 	fmt.Println("Connected. Type messages and press Enter.")
+	startRTTProbe(ctx, peer, *pingInterval)
 
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		fmt.Println(scanner.Text())
 	}
+}
+
+func startRTTProbe(ctx context.Context, peer *tunnel.Peer, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				start := time.Now()
+				resp, err := peer.Client.Get("https://tunnel/ping")
+				if err != nil {
+					fmt.Printf("tunnel rtt error: %s\n", err)
+					continue
+				}
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusNoContent {
+					fmt.Printf("tunnel rtt error: unexpected status %d\n", resp.StatusCode)
+					continue
+				}
+				fmt.Printf("tunnel rtt: %s\n", time.Since(start).Round(time.Millisecond))
+			}
+		}
+	}()
 }
