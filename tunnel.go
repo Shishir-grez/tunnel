@@ -42,7 +42,7 @@ func (t *Tunnel) Connect() error {
 		log.Debugf("local addr: %s, remote addr: %s\n", t.localAddr.String(), t.remoteAddr.String())
 		return nil
 	}
-	return err
+	return fmt.Errorf("hole punch failed: local NAT %s; remote NAT %s: %w", t.localNAT, t.remoteNAT, err)
 }
 
 // TODO: temporary code ↓
@@ -172,6 +172,7 @@ func (t *Tunnel) initTunnel() error {
 		return err
 	}
 	t.localNAT = localNAT
+	log.Debugf("local NAT: %s\n", localNAT)
 	err = t.signal.SendSignal(localNAT)
 	if err != nil {
 		return err
@@ -180,7 +181,7 @@ func (t *Tunnel) initTunnel() error {
 	if err != nil {
 		return err
 	}
-	log.Debugf("remote nat type: %d, token: %s, addr: %s\n", remoteNAT.NATType, remoteNAT.Token, remoteNAT.Addr)
+	log.Debugf("remote NAT: %s\n", remoteNAT)
 	// if both NATs are symmetric, we can't do anything
 	if remoteNAT.NATType == NATTypeSymmetric && localNAT.NATType == NATTypeSymmetric {
 		return fmt.Errorf("symmetric NAT not supported")

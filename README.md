@@ -56,6 +56,13 @@ go run ./example -name=Alice -signal=cloudflare -worker=https://<your-worker>.wo
 go run ./example -name=Alice -signal=cloudflare -worker=https://<your-worker>.workers.dev -ping-interval=0
 ```
 
+To debug hole-punch timeouts, enable tunnel logs before running the example:
+
+```powershell
+$env:TUNNEL_LOG = "debug"
+go run ./example -name=Alice -signal=cloudflare -worker=https://<your-worker>.workers.dev
+```
+
 ## API
 
 ```go
