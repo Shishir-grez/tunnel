@@ -17,6 +17,9 @@ const (
 	MessageTypeHandshake MessageType = iota + 1
 	MessageTypePing
 	MessageTypeData
+	MessageTypeHandshakeAck
+	MessageTypeHandshakeConfirm
+	MessageTypeHandshakeReady
 )
 
 type Message struct {
@@ -29,11 +32,15 @@ type Message struct {
 }
 
 func NewHandshakeMessage(token string) *Message {
+	return newHandshakeMessage(token, MessageTypeHandshake)
+}
+
+func newHandshakeMessage(token string, messageType MessageType) *Message {
 	return &Message{
 		header:  magicHeader,
 		version: 1,
 		token:   token,
-		mType:   MessageTypeHandshake,
+		mType:   messageType,
 		len:     0,
 	}
 }

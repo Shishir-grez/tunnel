@@ -7,42 +7,120 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"time"
 )
 
 type Tunnel struct {
 	ctx        context.Context
 	conn       net.PacketConn
+	directConn net.PacketConn
 	localAddr  net.UDPAddr
 	remoteAddr net.UDPAddr
 	localNAT   *NATDetail
 	remoteNAT  *NATDetail
 	signal     Signal
+	turnConfig *TURNConfig
+	relay      *turnRelay
+	path       string
 	cancelFunc context.CancelFunc
+	closeOnce  sync.Once
 }
 
-func NewTunnel(ctx context.Context, signal Signal) (*Tunnel, error) {
+func NewTunnel(ctx context.Context, signal Signal, options ...Option) (*Tunnel, error) {
 	ctx, cancelFunc := context.WithCancel(ctx)
-	return &Tunnel{
+	tunnel := &Tunnel{
 		ctx:        ctx,
 		signal:     signal,
 		cancelFunc: cancelFunc,
-	}, nil
+	}
+	for _, option := range options {
+		if err := option(tunnel); err != nil {
+			cancelFunc()
+			return nil, err
+		}
+	}
+	return tunnel, nil
 }
 
 func (t *Tunnel) Connect() error {
-	err := t.initTunnel()
-	if err != nil {
+	if err := t.initTunnel(); err != nil {
 		return err
 	}
-	c := handshake(t)
-	err, notClosed := <-c
-	if !notClosed {
-		log.Debugln("tunnel hole punch success")
-		log.Debugf("local addr: %s, remote addr: %s\n", t.localAddr.String(), t.remoteAddr.String())
+
+	hasRelay := t.relay != nil && t.remoteNAT.RelayAddr != ""
+	directTimeout := defaultHandshakeTimeout
+	if hasRelay {
+		directTimeout = 6 * time.Second
+	}
+
+	var directErr error
+	if t.localNAT.NATType == NATTypeSymmetric && t.remoteNAT.NATType == NATTypeSymmetric {
+		directErr = fmt.Errorf("both peers reported symmetric NAT")
+	} else {
+		directErr = waitForHandshake(t, directTimeout)
+		if directErr == nil {
+			t.path = "direct"
+			if t.relay != nil {
+				t.relay.Close()
+				t.relay = nil
+			}
+			log.Debugln("direct tunnel handshake success")
+			log.Debugf("local addr: %s, remote addr: %s\n", t.localAddr.String(), t.remoteAddr.String())
+			return nil
+		}
+	}
+
+	if !hasRelay {
+		return fmt.Errorf(
+			"direct hole punch failed and TURN fallback is unavailable: local NAT %s; remote NAT %s: %w",
+			t.localNAT,
+			t.remoteNAT,
+			directErr,
+		)
+	}
+
+	log.Debugf("direct handshake failed (%v); switching to TURN relay\n", directErr)
+	if t.conn != nil {
+		_ = t.conn.Close()
+	}
+	remoteRelayAddr, err := net.ResolveUDPAddr("udp4", t.remoteNAT.RelayAddr)
+	if err != nil {
+		return fmt.Errorf("resolve remote TURN address: %w", err)
+	}
+	t.conn = t.relay.conn
+	if localRelayAddr, ok := t.relay.conn.LocalAddr().(*net.UDPAddr); ok {
+		t.localAddr = *localRelayAddr
+	}
+	selectedAddr, relayErr := coordinatedHandshake(
+		t.conn,
+		[]*net.UDPAddr{remoteRelayAddr},
+		t.localNAT.Token,
+		t.remoteNAT.Token,
+		15*time.Second,
+	)
+	if relayErr != nil {
+		return fmt.Errorf("direct path failed (%v); TURN relay handshake failed: %w", directErr, relayErr)
+	}
+	t.remoteAddr = *selectedAddr
+	t.path = "turn-relay"
+	log.Debugln("TURN relay handshake success")
+	log.Debugf("local relay addr: %s, remote relay addr: %s\n", t.localAddr.String(), t.remoteAddr.String())
+	return nil
+}
+
+func waitForHandshake(t *Tunnel, attemptTimeout time.Duration) error {
+	done := handshake(t, attemptTimeout)
+	err, open := <-done
+	if !open {
 		return nil
 	}
-	return fmt.Errorf("hole punch failed: local NAT %s; remote NAT %s: %w", t.localNAT, t.remoteNAT, err)
+	return err
+}
+
+// TransportPath reports the selected packet path after Connect succeeds.
+func (t *Tunnel) TransportPath() string {
+	return t.path
 }
 
 // TODO: temporary code ↓
@@ -163,16 +241,29 @@ func (t *Tunnel) initTunnel() error {
 	defer func() {
 		if !keepConn {
 			_ = conn.Close()
+			if t.relay != nil {
+				t.relay.Close()
+				t.relay = nil
+			}
 		}
 	}()
 	resolver, err := NewResolver(conn)
 	if err != nil {
 		return err
 	}
-	defer resolver.Close()
-	localNAT, err := resolver.Resolve()
-	if err != nil {
-		return err
+	localNAT, resolveErr := resolver.Resolve()
+	resolver.Close()
+	if resolveErr != nil {
+		return resolveErr
+	}
+	if t.turnConfig != nil {
+		relay, relayErr := newTURNRelay(*t.turnConfig)
+		if relayErr != nil {
+			return relayErr
+		}
+		t.relay = relay
+		localNAT.RelayAddr = relay.conn.LocalAddr().String()
+		log.Debugf("local TURN relay: %s\n", localNAT.RelayAddr)
 	}
 	t.localNAT = localNAT
 	log.Debugf("local NAT: %s\n", localNAT)
@@ -185,8 +276,7 @@ func (t *Tunnel) initTunnel() error {
 		return err
 	}
 	log.Debugf("remote NAT: %s\n", remoteNAT)
-	// if both NATs are symmetric, we can't do anything
-	if remoteNAT.NATType == NATTypeSymmetric && localNAT.NATType == NATTypeSymmetric {
+	if remoteNAT.NATType == NATTypeSymmetric && localNAT.NATType == NATTypeSymmetric && t.relay == nil {
 		return fmt.Errorf("symmetric NAT not supported")
 	}
 	t.localNAT = localNAT
@@ -196,14 +286,22 @@ func (t *Tunnel) initTunnel() error {
 		Port: conn.LocalAddr().(*net.UDPAddr).Port,
 	}
 	t.conn = conn
+	t.directConn = conn
 	keepConn = true
 	return nil
 }
 
 func (t *Tunnel) Close() {
-	t.cancelFunc()
-	err := t.conn.Close()
-	if err != nil {
-		log.Debugf("close tunnel error: %s\n", err)
-	}
+	t.closeOnce.Do(func() {
+		t.cancelFunc()
+		if t.conn != nil {
+			_ = t.conn.Close()
+		}
+		if t.directConn != nil {
+			_ = t.directConn.Close()
+		}
+		if t.relay != nil {
+			t.relay.Close()
+		}
+	})
 }

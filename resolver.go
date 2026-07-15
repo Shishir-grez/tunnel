@@ -71,13 +71,21 @@ type NATDetail struct {
 	LocalAddrs []string `json:"local_addrs"`
 	NATType    NATType  `json:"nat_type"`
 	Token      string   `json:"token"`
+	RelayAddr  string   `json:"relay_addr,omitempty"`
 }
 
 func (d *NATDetail) String() string {
 	if d == nil {
 		return "<nil>"
 	}
-	return fmt.Sprintf("addr=%s local_addrs=%v nat_type=%s token=%s", d.Addr, d.LocalAddrs, d.NATType, d.Token)
+	return fmt.Sprintf(
+		"addr=%s local_addrs=%v nat_type=%s token=%s relay_addr=%s",
+		d.Addr,
+		d.LocalAddrs,
+		d.NATType,
+		d.Token,
+		d.RelayAddr,
+	)
 }
 
 type Resolver struct {

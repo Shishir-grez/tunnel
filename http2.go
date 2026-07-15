@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/quic-go/quic-go"
 	"golang.org/x/net/http2"
@@ -192,19 +193,24 @@ func (q *QuicWrapper) connectHTTP2() (*Peer, error) {
 func (q *QuicWrapper) quicConnect(ctx context.Context) (quic.Connection, error) {
 	localToken := q.tunnel.localNAT.Token
 	remoteToken := q.tunnel.remoteNAT.Token
+	config := &quic.Config{
+		HandshakeIdleTimeout: 15 * time.Second,
+		MaxIdleTimeout:       2 * time.Minute,
+		KeepAlivePeriod:      10 * time.Second,
+	}
 
 	if localToken > remoteToken {
 		return q.tr.Dial(ctx, &q.tunnel.remoteAddr, &tls.Config{
 			InsecureSkipVerify: true,
 			NextProtos:         []string{"h2", "tunnel"},
-		}, nil)
+		}, config)
 	}
 
 	tlsCfg, err := generateTLSConfig()
 	if err != nil {
 		return nil, err
 	}
-	listener, err := q.tr.Listen(tlsCfg, nil)
+	listener, err := q.tr.Listen(tlsCfg, config)
 	if err != nil {
 		return nil, err
 	}

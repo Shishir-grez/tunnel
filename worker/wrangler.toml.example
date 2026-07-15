@@ -1,6 +1,10 @@
 name = "tunnel-signal"
 main = "index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2026-07-15"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+TURN_KEY_ID = "<your-turn-key-id>"
 
 [[kv_namespaces]]
 binding = "SIGNAL_KV"
