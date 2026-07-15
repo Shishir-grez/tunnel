@@ -155,12 +155,15 @@ func (t *Tunnel) keepAlive() {
 // TODO: temporary code ↑
 
 func (t *Tunnel) initTunnel() error {
-	conn, err := net.ListenPacket("udp4", "0.0.0.0:0")
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		return err
 	}
+	keepConn := false
 	defer func() {
-		_ = conn.Close()
+		if !keepConn {
+			_ = conn.Close()
+		}
 	}()
 	resolver, err := NewResolver(conn)
 	if err != nil {
@@ -192,6 +195,8 @@ func (t *Tunnel) initTunnel() error {
 		IP:   net.IPv4zero,
 		Port: conn.LocalAddr().(*net.UDPAddr).Port,
 	}
+	t.conn = conn
+	keepConn = true
 	return nil
 }
 

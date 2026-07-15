@@ -37,6 +37,10 @@ func handshake(tunnel *Tunnel) chan error {
 
 func handshakeLocalSymmetric(tunnel *Tunnel, done chan error) {
 	log.Debugln("handshake local symmetric ...")
+	if tunnel.conn != nil {
+		_ = tunnel.conn.Close()
+		tunnel.conn = nil
+	}
 	remote := tunnel.remoteNAT
 	local := tunnel.localNAT
 	remoteAddr, err := net.ResolveUDPAddr("udp4", remote.Addr)
@@ -44,7 +48,7 @@ func handshakeLocalSymmetric(tunnel *Tunnel, done chan error) {
 		done <- err
 		return
 	}
-	c := make(chan *net.UDPAddr, 1)
+	c := make(chan *net.UDPConn, 1)
 	stopChan := make(chan int, 1)
 	var selected int32 = 0
 	// birthday attack
@@ -56,8 +60,11 @@ func handshakeLocalSymmetric(tunnel *Tunnel, done chan error) {
 				log.Debugf("udp listen err, %s\n", err)
 				return
 			}
+			keepConn := false
 			defer func() {
-				_ = conn.Close()
+				if !keepConn {
+					_ = conn.Close()
+				}
 			}()
 			// send handshake
 			err = udpWrite(conn, remoteAddr, NewHandshakeMessage(local.Token))
@@ -77,22 +84,15 @@ func handshakeLocalSymmetric(tunnel *Tunnel, done chan error) {
 			if !atomic.CompareAndSwapInt32(&selected, 0, 1) {
 				return
 			}
-			localAddr := conn.LocalAddr().(*net.UDPAddr)
-			// ensure conn is closed
-			_ = conn.Close()
+			keepConn = true
 			close(stopChan)
-			c <- localAddr
+			c <- conn
 		}()
 	}
 	select {
 	case <-time.After(timeout):
 		done <- fmt.Errorf("timeout")
-	case localAddr := <-c:
-		conn, err := net.ListenUDP("udp4", localAddr)
-		if err != nil {
-			done <- err
-			return
-		}
+	case conn := <-c:
 		tunnel.conn = conn
 		tunnel.remoteAddr = *remoteAddr
 		close(done)
@@ -105,7 +105,7 @@ func handshakeRemoteSymmetric(tunnel *Tunnel, done chan error) {
 	local := tunnel.localNAT
 	candidates := candidateAddrs(remote)
 
-	conn, err := net.ListenUDP("udp4", &tunnel.localAddr)
+	conn, err := tunnel.udpConn()
 	if err != nil {
 		done <- err
 		return
@@ -156,7 +156,7 @@ func handshakeNonSymmetric(tunnel *Tunnel, done chan error) {
 	local := tunnel.localNAT
 	candidates := candidateAddrs(remote)
 
-	conn, err := net.ListenUDP("udp4", &tunnel.localAddr)
+	conn, err := tunnel.udpConn()
 	if err != nil {
 		done <- err
 		return
@@ -207,6 +207,14 @@ func handshakeNonSymmetric(tunnel *Tunnel, done chan error) {
 		close(done)
 		return
 	}
+}
+
+func (tunnel *Tunnel) udpConn() (*net.UDPConn, error) {
+	conn, ok := tunnel.conn.(*net.UDPConn)
+	if !ok || conn == nil {
+		return nil, fmt.Errorf("tunnel connection is not a UDP connection")
+	}
+	return conn, nil
 }
 
 // candidateAddrs returns all addresses to try for the remote peer:
