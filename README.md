@@ -26,7 +26,7 @@ UDP Hole Punching → QUIC → HTTP/2
 
 ```bash
 cd worker
-# Fill in your KV namespace ID in wrangler.toml, then:
+# Copy wrangler.toml.example to wrangler.toml and fill in your KV namespace ID, then:
 wrangler kv namespace create SIGNAL_KV
 wrangler deploy
 ```
