@@ -103,7 +103,7 @@ func handshakeRemoteSymmetric(tunnel *Tunnel, done chan error) {
 	log.Debugln("handshake remote symmetric ...")
 	remote := tunnel.remoteNAT
 	local := tunnel.localNAT
-	candidates := candidateAddrs(remote)
+	candidates := candidateAddrs(local, remote)
 
 	conn, err := tunnel.udpConn()
 	if err != nil {
@@ -154,7 +154,7 @@ func handshakeRemoteSymmetric(tunnel *Tunnel, done chan error) {
 func handshakeNonSymmetric(tunnel *Tunnel, done chan error) {
 	remote := tunnel.remoteNAT
 	local := tunnel.localNAT
-	candidates := candidateAddrs(remote)
+	candidates := candidateAddrs(local, remote)
 
 	conn, err := tunnel.udpConn()
 	if err != nil {
@@ -217,23 +217,69 @@ func (tunnel *Tunnel) udpConn() (*net.UDPConn, error) {
 	return conn, nil
 }
 
-// candidateAddrs returns all addresses to try for the remote peer:
-// the public (STUN-mapped) address first, followed by any LAN addresses.
-func candidateAddrs(remote *NATDetail) []*net.UDPAddr {
+// candidateAddrs returns addresses to try for the remote peer:
+// the public (STUN-mapped) address first, followed by plausible same-LAN addresses.
+func candidateAddrs(local, remote *NATDetail) []*net.UDPAddr {
 	seen := map[string]bool{}
 	var addrs []*net.UDPAddr
-	for _, s := range append([]string{remote.Addr}, remote.LocalAddrs...) {
+
+	add := func(s string) {
 		if s == "" || seen[s] {
-			continue
+			return
 		}
 		seen[s] = true
 		a, err := net.ResolveUDPAddr("udp4", s)
 		if err != nil {
-			continue
+			return
 		}
 		addrs = append(addrs, a)
 	}
+
+	add(remote.Addr)
+	for _, s := range remote.LocalAddrs {
+		if isSameLANCandidate(local.LocalAddrs, s) {
+			add(s)
+		}
+	}
+	log.Debugf("candidate addresses: %v\n", addrs)
 	return addrs
+}
+
+func isSameLANCandidate(localAddrs []string, remoteAddr string) bool {
+	remoteUDPAddr, err := net.ResolveUDPAddr("udp4", remoteAddr)
+	if err != nil || !isRFC1918(remoteUDPAddr.IP) {
+		return false
+	}
+	for _, localAddr := range localAddrs {
+		localUDPAddr, err := net.ResolveUDPAddr("udp4", localAddr)
+		if err != nil || !isRFC1918(localUDPAddr.IP) {
+			continue
+		}
+		if sameIPv4Prefix(localUDPAddr.IP, remoteUDPAddr.IP, 24) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRFC1918(ip net.IP) bool {
+	ip = ip.To4()
+	if ip == nil {
+		return false
+	}
+	return ip[0] == 10 ||
+		(ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
+		(ip[0] == 192 && ip[1] == 168)
+}
+
+func sameIPv4Prefix(a, b net.IP, bits int) bool {
+	a = a.To4()
+	b = b.To4()
+	if a == nil || b == nil {
+		return false
+	}
+	mask := net.CIDRMask(bits, 32)
+	return a.Mask(mask).Equal(b.Mask(mask))
 }
 
 func udpWrite(conn *net.UDPConn, addr *net.UDPAddr, msg *Message) error {
